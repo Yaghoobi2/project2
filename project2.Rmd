@@ -1,0 +1,1584 @@
+---
+title: "Development_project2"
+author: "Ali Yaghoobi"
+date: "`r Sys.Date()`"
+output:
+    html_document:
+        theme: readable    
+        highlight: kate
+        toc: true    
+        toc_depth: 4
+        toc_float: true    
+        df_print: paged
+        code_folding: hide    
+        css: styles.css
+editor_options:
+  markdown:
+    wrap: 72
+---
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(warning = FALSE)
+```
+# Import library
+```{r warning=FALSE}
+library(dplyr)
+library(data.table)
+library(knitr)
+library(ggplot2)
+library(tidyverse)
+library(readxl)
+library(tidyr)
+library(shiny)
+library(leaflet)
+library(mdbr)
+library(Hmisc)
+library(leaflet)
+library(tigris)
+library(sf)
+library(readxl)
+library(tidyverse)
+library(shiny)
+library(labelled)
+library(RSocrata)
+library(shinythemes)
+library(RColorBrewer)
+library(rsconnect)
+library(haven)
+library(mapview)
+library(forcats)
+library(writexl)
+library(psych)
+library(foreign)
+library(kableExtra)
+library(DBI)
+library(odbc)
+
+```
+
+# Poverty Analysis
+
+## Read data
+
+```{r }
+
+
+conn <- dbConnect(odbc(),
+                  Driver = "{Microsoft Access Driver (*.mdb, *.accdb)}",
+                  DBQ = "C:/Users/user/Desktop/project2/raw data1401/HB1401_14020611.mdb")
+
+tables <- dbListTables(conn)
+tables <- tables[!grepl("^MSys", tables)]
+
+df <- list()
+
+for (table in tables) {
+  df[[table]] <- dbReadTable(conn, table)
+}
+
+save(df, file = "df.RData")
+
+dbDisconnect(conn)
+
+```
+
+```{r pressure, echo=FALSE}
+# حذف جداول خاص برای سال 1401
+df[["R1401P3S10"]] <- NULL
+df[["U1401P3S10"]] <- NULL
+
+# ذخیره کردن نام‌های اصلی جداول
+original_names <- names(df)
+
+# افزودن ستون "RU" به هر دیتافریم در لیست df
+df <- lapply(df, function(df_item) {
+  if (is.null(df_item)) {
+    # اگر دیتافریم NULL بود، یک دیتافریم جدید با ستون "RU" و مقدار NA بساز
+    df_item <- data.frame(RU = NA)
+  } else {
+    # افزودن ستون "RU" به دیتافریم
+    df_item$RU <- ifelse(nrow(df_item) > 0, "R", NA)
+  }
+  return(df_item)
+})
+
+# بازگرداندن نام‌های اصلی به دیتافریم‌ها
+names(df) <- original_names
+
+# اعمال تغییرات به محیط گلوبال و حذف متغیرهای موقت
+invisible(lapply(names(df), function(x) assign(x, df[[x]], envir = .GlobalEnv)))
+rm(df)
+
+# فهرست تمام اشیاء در محیط گلوبال
+all_objects <- ls()
+
+# فیلتر کردن نام‌هایی که دیتافریم هستند
+df_names <- all_objects[sapply(all_objects, function(x) is.data.frame(get(x)))]
+
+# ایجاد یک لیست جدید برای نگهداری دیتافریم‌های ترکیب شده
+combined_dfs <- list()
+
+# ترکیب دیتافریم‌ها با نام‌های مشابه (R و U)
+for (name in df_names) {
+  # ایجاد یک نام جایگزین با تغییر اولین حرف
+  if (substr(name, 1, 1) == "R") {
+    alt_name <- paste0("U", substr(name, 2, nchar(name)))
+    urban_rural <- "R"
+  } else if (substr(name, 1, 1) == "U") {
+    alt_name <- paste0("R", substr(name, 2, nchar(name)))
+    urban_rural <- "U"
+  } else {
+    next  # اگر نام دیتافریم شروع به R یا U نداشت، عبور کن
+  }
+
+  # چک کردن اینکه آیا نام جایگزین هم موجود است
+  if (alt_name %in% df_names) {
+    # دریافت دیتافریم‌های اصلی و جایگزین
+    df1 <- get(name)
+    df1$urban_rural <- urban_rural
+
+    df2 <- get(alt_name)
+    df2$urban_rural <- ifelse(urban_rural == "R", "U", "R")  # مقدار مخالف
+
+    # ترکیب دیتافریم‌ها
+    combined_df <- rbind(df1, df2)
+    combined_dfs[[substr(name, 2, nchar(name))]] <- combined_df
+  }
+}
+
+# افزودن پیشوند "RU" به نام‌ها
+character_to_add <- "RU"
+new_list_names <- paste0(character_to_add, names(combined_dfs))
+names(combined_dfs) <- new_list_names
+
+# حذف همه اشیاء به جز combined_dfs
+objects <- ls()
+
+# تعیین شیء‌ای که می‌خواهیم نگه داریم
+object_to_keep <- "combined_dfs"
+
+# حذف تمام اشیاء به جز شیء مورد نظر
+objects_to_remove <- setdiff(objects, object_to_keep)
+rm(list = objects_to_remove)
+
+# اعمال نتایج نهایی به محیط گلوبال
+invisible(lapply(names(combined_dfs), function(x) assign(x, combined_dfs[[x]], envir = .GlobalEnv)))
+
+
+
+
+
+
+```
+
+## Data Cleaning
+
+```{r warning=FALSE}
+#data cleaning
+
+Province <- c(Markazi = "00", Ardabil = "24", Bushehr = "18", `Chaharmahal and Bakhtiari` = "14",
+  `East Azerbaijan` = "03", Fars = "07", Gilan = "01", Golestan = "27",
+  Hamadan = "13", Hormozgan = "22", Ilam = "16", Isfahan = "10",
+  Kerman = "08", Kermanshah = "05", Khuzestan = "06", `Kohgiluyeh and Boyer-Ahmad` = "17",
+  Kurdistan = "12", Lorestan = "15", Alborz = "30", Mazandaran = "02",
+  `North Khorasan` = "28", Qazvin = "26", Qom = "25", `Razavi Khorasan` = "09",
+  Semnan = "20", `Sistan and Baluchestan` = "11", `South Khorasan` = "29", Tehran = "23",
+  `West Azerbaijan` = "04", Yazd = "21", Zanjan = "19")
+
+RU1401Data <- RU1401Data %>% 
+  rename(khanevartype = NoeKhn)  %>% 
+  mutate(province = fct_recode(as.factor(substr(Address, 2, 3)), !!!Province),
+         town = as.integer(substr(Address, 4, 5)))
+
+
+
+relation <- c(head = "1", spouse = "2", child = "3", childinlaw = "4", grandchild = "5", parent = "6", sibling = "7", relative = "8", nonrelative = "9")
+gender <- c(Male = "1", Female = "2")
+literacy <- c(literate = "1", illiterate = "2")
+yesno <- c(Yes = "1", No = "2")
+education <- c(Elemantry = "1", Secondary = "2", HighSchool = "3", Diploma = "4", College = "5", Bachelor = "6", Master = "7", PhD = "8", Other = "9")
+occupation <- c(employed = "1", unemployed = "2", IncomeWOJob = "3", Student = "4", Housewife = "5", Other = "6")
+marital <- c(Married = "1", Widowed = "2", Divorced = "3", Single = "4")
+
+RU1401P1 <- RU1401P1 %>% 
+  rename(
+    member = DYCOL01,
+    relation = DYCOL03,
+    gender = DYCOL04,
+    age = DYCOL05,
+    literacy = DYCOL06,
+    studying = DYCOL07,
+    education = DYCOL08,
+    occupationalst = DYCOL09,
+    maritalst = DYCOL10) %>%  
+  mutate(across(where(is.character), as.integer, .names = "converted_{.col}")) %>% 
+  mutate(across(contains("converted_"), ~replace_na(., 0))) %>% 
+  select(-starts_with("converted_")) %>% 
+  mutate(across(c(relation, gender, literacy, studying, education, occupationalst, maritalst), as.factor),
+         relation = fct_recode(relation, !!!relation), 
+         gender = fct_recode(gender, !!!gender),
+         literacy = fct_recode(literacy, !!!literacy), 
+         studying = fct_recode(studying, !!!yesno),
+         education = fct_recode(education, !!!education), 
+         occupationalst = fct_recode(occupationalst, !!!occupation),
+         maritalst = fct_recode(maritalst, !!!marital)) 
+
+# Inspecting the data before conversion to integers
+sapply(RU1401P1, function(x) if (is.character(x)) table(x, useNA = "ifany"))
+```
+
+```{r}
+# تعریف مقادیر جایگزین برای ستون‌ها
+tenure <- c(OwnedEstateLand="1", OwnedEstate="2", Rent="3", Mortgage="4", Service="5", Free="6", Other="7")
+material <- c(MetalBlock="1", BrickWood="2", Cement="3", Brick="4", Wood="5", WoodKesht="6", KeshtGel="7", Other="8")
+fuel <- c(Oil="1", Gasoline="2", LiquidGas="3", NaturalGas="4", Electricity="5", Wood="6", AnimalOil="7", Coke="8", Other="9", None="10" )
+fuel1 <- c(Oil="11", Gasoline="12", LiquidGas="13", NaturalGas="14", Electricity="15", Wood="16", AnimalOil="17", Coke="18", Other="19", None="20" )
+fuel2 <- c(Oil="21", Gasoline="22", LiquidGas="23", NaturalGas="24", Electricity="25", Wood="26", AnimalOil="27", Coke="28", Other="29", None="30" )
+
+# اعمال تغییرات روی داده‌ها
+RU1401P2 <- RU1401P2 %>% 
+  # تغییر نام ستون‌ها
+  rename(
+    tenure = DYCOL001,
+    room = DYCOL03,
+    space = DYCOL04,
+    construction = DYCOL05,
+    material = DYCOL06,
+    vehicle = DYCOL07,
+    motorcycle = DYCOL08,
+    bicycle = DYCOL09,
+    radio = DYCOL10,
+    radiotape = DYCOL11,
+    TVbw = DYCOL12,
+    TV = DYCOL13,
+    VHS_VCD_DVD = DYCOL14,
+    computer = DYCOL15,
+    cellphone = DYCOL16,
+    freezer = DYCOL17,
+    refridgerator = DYCOL18,
+    fridge = DYCOL19,
+    stove = DYCOL20,
+    vacuum = DYCOL21,
+    washingmachine = DYCOL22,
+    sewingmachine = DYCOL23,
+    fan = DYCOL24,
+    evapcoolingportable = DYCOL25,
+    splitportable = DYCOL26,
+    dishwasher = DYCOL27,
+    microwave = DYCOL28,
+    none = DYCOL29,
+    pipewater = DYCOL30,
+    electricity = DYCOL31,
+    pipegas = DYCOL32,
+    telephone = DYCOL33,
+    internet  = DYCOL34,
+    bathroom = DYCOL35,
+    kitchen = DYCOL36,
+    evapcooling = DYCOL37,
+    centralcooling = DYCOL38,
+    centralheating = DYCOL39,
+    package = DYCOL40,
+    split = DYCOL41,
+    wastewater = DYCOL42,
+    cookingfuel = DYCOL43,
+    heatingfuel = DYCOL44,
+    waterheatingfuel = DYCOL45
+  ) %>% 
+  # تغییرات دیگر برای تبدیل به اعداد و دسته‌بندی به صورت factor
+  mutate(
+    across(where(is.character) & !starts_with("Address"), as.integer),  # تبدیل ستون‌های غیر از Address به عددی
+    across(c(tenure, material, cookingfuel, heatingfuel, waterheatingfuel), as.factor),  # تبدیل به factor برای ستون‌های خاص
+    tenure = fct_recode(tenure, !!!tenure),  # تخصیص مقادیر جدید به tenure
+    material = fct_recode(material, !!!material),  # تخصیص مقادیر جدید به material
+    cookingfuel = fct_recode(cookingfuel, !!!fuel),  # تخصیص مقادیر جدید به cookingfuel
+    heatingfuel = fct_recode(heatingfuel, !!!fuel1),  # تخصیص مقادیر جدید به heatingfuel
+    waterheatingfuel = fct_recode(waterheatingfuel, !!!fuel2),  # تخصیص مقادیر جدید به waterheatingfuel
+    across(vehicle:wastewater, ~!is.na(.x))  # حذف NA ها در ستون‌های انتخابی
+  )
+
+# بررسی مجدد ستون Address
+summary(RU1401P2$Address)
+
+
+```
+
+```{r}
+
+
+RU1401P3S01 <- RU1401P3S01 %>% 
+  rename(
+    code = DYCOL01,
+    purchased = DYCOL02,
+    gram = DYCOL03,
+    kilogram = DYCOL04,
+    price = DYCOL05,
+    value = DYCOL06 ) %>% 
+  mutate(
+    across(c(price, value, kilogram), ~ as.numeric(as.character(.x))),
+    table = 1L) %>% 
+  mutate(purchased = factor(purchased, levels = c(1, 2, 3, 4, 5, 6, 7, 8),
+                            labels = c("purchased", "homemade", "publicservice", "cooperativeservice",
+                                       "privateservice", "agriculture", "nonagriculture", "free")))
+
+# Part 3, Table 2
+RU1401P3S02 <- RU1401P3S02 %>% 
+  rename(
+    code = DYCOL01,
+    purchased = DYCOL02,
+    gram = DYCOL03,
+    kilogram = DYCOL04,
+    price = DYCOL05,
+    value = DYCOL06 ) %>% 
+  mutate(
+    table = 2L) %>% 
+  mutate(purchased = factor(purchased, levels = c(1, 2, 3, 4, 5, 6, 7, 8),
+                            labels = c("purchased", "homemade", "publicservice", "cooperativeservice",
+                                       "privateservice", "agriculture", "nonagriculture", "free")))  
+
+# Part 3, Table 3
+RU1401P3S03 <- RU1401P3S03 %>% 
+  rename(
+    code = DYCOL01,
+    purchased = DYCOL02,
+    value = DYCOL03 ) %>% 
+  mutate(
+    table = 3L) %>% 
+  mutate(purchased = factor(purchased, levels = c(1, 2, 3, 4, 5, 6, 7, 8),
+                            labels = c("purchased", "homemade", "publicservice", "cooperativeservice",
+                                       "privateservice", "agriculture", "nonagriculture", "free")))
+
+
+RU1401P3S04 <- RU1401P3S04 %>% 
+  rename(
+    code = DYCOL01,
+    mortgage = DYCOL02,
+    purchased = DYCOL03,
+    value = DYCOL04 ) %>% 
+  mutate(table = 4L) %>% 
+  mutate(purchased = factor(purchased, levels = c(1, 2, 3, 4, 5, 6, 7, 8),
+                            labels = c("purchased", "homemade", "publicservice", "cooperativeservice",
+                                       "privateservice", "agriculture", "nonagriculture", "free")))
+
+# Part 3, Table 5
+RU1401P3S05 <- RU1401P3S05  %>% 
+  rename(
+    code = DYCOL01,
+    purchased = DYCOL02,
+    value = DYCOL03 ) %>% 
+  mutate(table = 5L) %>% 
+  mutate(purchased = factor(purchased, levels = c(1, 2, 3, 4, 5, 6, 7, 8),
+                            labels = c("purchased", "homemade", "publicservice", "cooperativeservice",
+                                       "privateservice", "agriculture", "nonagriculture", "free")))
+
+# Part 3, Table 6
+RU1401P3S06 <- RU1401P3S06  %>% 
+  rename(
+    code = DYCOL01,
+    purchased = DYCOL02,
+    value = DYCOL03) %>% 
+  mutate(table = 6L) %>% 
+  mutate(purchased = factor(purchased, levels = c(1, 2, 3, 4, 5, 6, 7, 8),
+                            labels = c("purchased", "homemade", "publicservice", "cooperativeservice",
+                                       "privateservice", "agriculture", "nonagriculture", "free")))
+
+# Part 3, Table 7
+RU1401P3S07 <- RU1401P3S07 %>% 
+  rename(
+    code = DYCOL01,
+    purchased = DYCOL02,
+    value = DYCOL03) %>% 
+  mutate(
+    table = 7L)  %>% 
+  mutate(purchased = factor(purchased, levels = c(1, 2, 3, 4, 5, 6, 7, 8),
+                            labels = c("purchased", "homemade", "publicservice", "cooperativeservice",
+                                       "privateservice", "agriculture", "nonagriculture", "free")))
+
+# Part 3, Table 8
+RU1401P3S08 <- RU1401P3S08 %>% 
+  rename(
+    code = DYCOL01,
+    purchased = DYCOL02,
+    value = DYCOL03) %>% 
+  mutate(
+    table = 8L) %>% 
+  mutate(purchased = factor(purchased, levels = c(1, 2, 3, 4, 5, 6, 7, 8),
+                            labels = c("purchased", "homemade", "publicservice", "cooperativeservice",
+                                       "privateservice", "agriculture", "nonagriculture", "free")))
+
+# Part 3, Table 9
+RU1401P3S09 <- RU1401P3S09 %>% 
+  rename(
+    code = DYCOL01,
+    purchased = DYCOL02,
+    value = DYCOL03) %>% 
+  mutate(
+    table = 9L) %>% 
+  mutate(purchased = factor(purchased, levels = c(1, 2, 3, 4, 5, 6, 7, 8),
+                            labels = c("purchased", "homemade", "publicservice", "cooperativeservice",
+                                       "privateservice", "agriculture", "nonagriculture", "free")))
+
+
+# Part 3, Table 11
+
+RU1401P3S11 <- RU1401P3S11 %>% 
+  rename(
+    code = DYCOL01,
+    purchased = DYCOL02,
+    value = DYCOL03) %>% 
+  mutate(
+    table = 11L)  %>% 
+  mutate(purchased=factor(purchased, levels = c(1,2,3,4,5,6,7,8),
+                                labels = c("purchased",
+                                           "homemade",
+                                            "publicservice",
+                                            "cooperativeservice",
+                                            "privateservice",
+                                            "agriculture",
+                                            "nonagriculture",
+                                            "free")))
+
+RU1401Data_selected <- select(RU1401Data, Address, weight)
+
+# Generate potential dataset names
+dataset_names <- paste0("RU1401P3S", sprintf("%02d", 1:12))
+
+# Filter out names of datasets that actually exist in the environment
+existing_datasets <- Filter(function(name) exists(name, envir = .GlobalEnv), dataset_names)
+
+# Apply the transformation and merge with RU1401Data_selected to each dataset
+transformed_and_merged_datasets <- lapply(mget(existing_datasets, envir = .GlobalEnv), function(df) {
+  df %>% 
+    mutate(province = fct_recode(as.factor(substr(Address, 2, 3)), !!!Province),
+           town = as.integer(substr(Address, 4, 5))) %>%
+    left_join(RU1401Data_selected, by = "Address")
+})
+
+# Apply the transformed and merged datasets to global environment
+invisible(lapply(names(transformed_and_merged_datasets), function(x) assign(x, transformed_and_merged_datasets[[x]], envir = .GlobalEnv)))
+
+# Specify the objects you want to keep
+object_to_keep <- grep("^RU", ls(), value = TRUE)
+
+# Remove all other objects
+rm(list = setdiff(ls(), object_to_keep))
+gc()
+
+
+```
+
+## Quastion 1.1
+
+```{r}
+RU1401P3S01 <- RU1401P3S01 %>%
+  mutate(code = as.numeric(code))
+
+RU1401P3S01 <- RU1401P3S01 %>% 
+  mutate(label = case_when(
+    code >= 11140 & code <= 11156 ~ "bread",
+    code >= 11111 & code <= 11118 ~ "rice",
+    code == 11164 ~ "spaghetti",
+    code == 11731 | code == 11725 ~ "potato & pea", # Use | instead of &
+    code >= 11411 & code <= 11414 ~ "milk",
+    code >= 11424 & code <= 11426 ~ "yoghurt",
+    (code == 11241) | (code >= 11211 & code <= 11224) ~ "Meat",
+    code >= 11441 & code <= 11443 ~ "egg",
+    code >= 11428 & code <= 11432 ~ "cheese",
+    code >= 11611 & code <= 11643 ~ "fruit",
+    (code >= 11711 & code <= 11716) | (code >= 11721 & code <= 11754) & code != 11731 ~ "vegetables", # Corrected logical grouping
+    code == 11533 ~ "oil",
+    code == 11812 | code == 11811 | (code >= 11821 & code <= 11823) ~ "sugar & Jam", # Corrected logical grouping
+    code >= 11761 & code <= 11769 ~ "hobobat",
+    ((code >= 11311 & code <= 11321) & code != 11319) | (code >= 11231 & code <= 11239) ~ "fish & chiken", # Corrected logical grouping
+    TRUE ~ NA_character_))
+
+
+
+```
+
+### In this part we want to calculate the price of the bundle constructed in previous section for households in each province
+
+```{r}
+merged_data <- RU1401P3S01 %>%
+  mutate(gram = as.numeric(gram),  # Convert 'gram' to numeric
+         gram = ifelse(is.na(gram), 0, gram / 1000),  # Handle NA and convert to kilograms
+         kilogram = ifelse(is.na(kilogram), 0, kilogram),  # Handle NA in 'kilogram'
+         kilogram = kilogram + gram) %>%  # Sum 'gram' and 'kilogram'
+  select(-gram)  # Remove the 'gram' column
+
+prices <- merged_data %>%
+  group_by(label, province) %>%
+  dplyr::summarize(weighted_mean_price = sum(value * weight, na.rm = TRUE) / sum(kilogram * weight, na.rm = TRUE))
+
+```
+
+```{r}
+monthly_needs <- data.frame(
+  label = c("bread", "rice", "spaghetti", "potato & pee", "hobobat", "milk", "yoghurt",
+            "Meat", "fish & chiken", "egg", "cheese", "fruit", "vegetables", "oil", "sugar & jam"),
+  needs_kg = c(8, 3, 0.7, 1.5, 0.6, 7, 3, 1.2, 1.5, 0.7, 0.45, 9, 4.5, 0.9, 1)
+)
+```
+
+### First we used weighted average of prices to estimate the bundle price. In next approach we used following formula:
+
+```{r}
+Total_cost_by_province <- merged_data %>%
+  group_by(label, urban_rural, province) %>%
+  dplyr::summarize(weighted_mean_price = weighted.mean(price, weight, na.rm = TRUE)) %>%
+  left_join(monthly_needs, by = "label") %>% 
+  mutate(total_product_cost = weighted_mean_price * needs_kg) %>%
+  group_by(urban_rural,province) %>%
+  summarise(total_bundle_price = sum(total_product_cost, na.rm = TRUE))
+```
+
+```{r}
+Total_cost_by_province1 <- merged_data %>%
+  dplyr::group_by(label, urban_rural, province) %>%
+  dplyr::summarize(weighted_mean_price = sum(value * weight, na.rm = TRUE) / sum(kilogram * weight, na.rm = TRUE)) %>%
+  left_join(monthly_needs, by = "label")
+
+```
+
+```{r}
+Total_cost_by_province1 <- Total_cost_by_province1 %>%
+  mutate(total_product_cost = weighted_mean_price * needs_kg)
+
+Total_cost_by_province1 <- Total_cost_by_province1 %>%
+  group_by(province,urban_rural) %>%
+  dplyr::summarize(total_bundle_price = sum(total_product_cost, na.rm = TRUE))
+
+Total_cost_by_province <- Total_cost_by_province %>%
+  left_join(Total_cost_by_province1 , by = "province")
+
+Total_cost_by_province <- Total_cost_by_province %>% 
+  arrange(-total_bundle_price.x)
+
+kable(Total_cost_by_province) %>%
+  kable_styling(bootstrap_options = "striped", full_width = FALSE)
+```
+
+## Quastion 1.2
+
+```{r}
+library(dplyr)
+
+# ایجاد لیست نام دیتاست‌ها برای سال 1401
+dataset_names <- paste0("RU1401P3S", sprintf("%02d", 1:12))
+
+# انتخاب دیتاست‌هایی که در محیط R وجود دارند
+existing_datasets <- Filter(function(name) exists(name, envir = .GlobalEnv), dataset_names)
+
+# استخراج تمام ستون‌های موجود در دیتاست‌ها
+all_columns <- unique(unlist(lapply(existing_datasets, function(ds_name) {
+    colnames(get(ds_name, envir = .GlobalEnv))
+})))
+
+# ترکیب مجموعه داده‌ها با افزودن ستون‌های خالی برای ستون‌های غایب
+combined_dataset <- do.call(rbind, lapply(existing_datasets, function(ds_name) {
+    dataset <- get(ds_name, envir = .GlobalEnv)
+    missing_columns <- setdiff(all_columns, colnames(dataset))
+    dataset[missing_columns] <- NA
+    return(dataset)
+}))
+
+# تبدیل ستون value به نوع عددی و مدیریت مقادیر غیرعددی
+combined_dataset <- combined_dataset %>%
+  mutate(value = as.numeric(value))
+
+# بررسی مقادیر غیرعددی در ستون value
+invalid_values <- combined_dataset %>%
+  filter(is.na(value) & !is.na(value))
+
+if (nrow(invalid_values) > 0) {
+  cat("Warning: Non-numeric values detected in the 'value' column. They have been converted to NA.\n")
+  print(invalid_values)
+}
+
+# بررسی اینکه آیا ستون‌های Address، urban_rural و weight وجود دارند
+if (!all(c("Address", "urban_rural", "weight") %in% colnames(combined_dataset))) {
+  stop("One or more of the required columns (Address, urban_rural, weight) are missing from the combined dataset.")
+}
+
+# گروه‌بندی داده‌ها و محاسبه مجموع مقادیر
+total_values <- combined_dataset %>%
+  group_by(Address, urban_rural,province,weight) %>%
+  summarise(total_value = sum(value, na.rm = TRUE), .groups = "drop")
+
+# مشاهده خروجی نهایی
+print(total_values)
+```
+
+```{r}
+total_values_sorted <- total_values %>% 
+  arrange(total_value)
+
+# Calculate the number of rows to select (20% of the total rows)
+num_rows_to_select <- ceiling(nrow(total_values_sorted) * 0.20)
+lowest_20_percent <- head(total_values_sorted, num_rows_to_select)
+
+
+
+```
+
+```{r}
+addresses_lowest_20_percent <- lowest_20_percent %>% 
+  select(Address)
+RU1401P3S01_filtered <- RU1401P3S01 %>%
+  semi_join(addresses_lowest_20_percent, by = "Address")
+
+```
+
+```{r}
+codes_with_NA_label <- RU1401P3S01_filtered %>%
+  mutate(code = as.numeric(as.character(code))) %>%  # تبدیل code به عددی
+  group_by(code,urban_rural) %>%
+  dplyr::summarize(count = n(), .groups = 'drop')
+
+# افزودن برچسب‌ها به کدها
+codes_with_NA_label <- codes_with_NA_label %>% 
+  mutate(label = case_when(
+    code >= 11911 & code <= 11919 ~ "spices",
+    code == 11921 ~ "tomato paste",
+    code >= 12111 & code <= 12114 ~ "tea & coffee",
+    code == 12211 ~ "soda",
+    code >= 11171 & code <= 11175 ~ "biscuit & cake",
+    code == 11665 ~ "chips & pofak",
+    code == 11531 ~ "jamed oil",
+    code %in% c(11161, 11162, 11165) ~ "flour",
+    code == 11423 ~ "ice cream",
+    code == 12212 ~ "doogh",
+    code == 12213 ~ "beer",
+    code == 11433 ~ "curd",
+    code == 11661 ~ "sunflower seeds",
+    code >= 11521 & code <= 11523 ~ "butter",
+    code == 11839  ~ "chocolate",
+    code == 11841 ~ "candy",
+    TRUE ~ NA_character_ # نگه‌داشتن NA برای موارد نامشخص
+  )) %>% 
+  filter(!is.na(label)) # حذف مقادیر با برچسب NA
+
+# مرتب‌سازی بر اساس تعداد
+codes_with_NA_label <- codes_with_NA_label %>% 
+  arrange(-count)
+
+# نمایش داده با استفاده از kable
+kable(codes_with_NA_label) %>%
+  kable_styling(bootstrap_options = "striped", full_width = FALSE)
+
+```
+
+```{r}
+RU1401P3S01_processed <- RU1401P3S01_filtered %>%
+  mutate(
+    gram = as.numeric(gram),  # تبدیل به عددی
+    gram = ifelse(is.na(gram), 0, gram / 1000), # تبدیل گرم به کیلوگرم و مدیریت NA ها
+    kilogram = kilogram + gram  # افزودن به ستون کیلوگرم
+  ) %>%
+  select(-gram)  # حذف ستون گرم
+
+# پردازش‌های بیشتر
+RU1401P3S01_processed <- RU1401P3S01_processed %>%
+  filter(!(is.na(kilogram) & is.na(price))) %>%
+  mutate(
+    kilogram = ifelse(is.na(kilogram) & !is.na(value) & !is.na(price) & price != 0,
+                      value / price, 
+                      kilogram)
+  )
+
+# پیوستن با دیتاست قیمت‌ها
+RU1401P3S01_processed <- RU1401P3S01_processed %>%
+  left_join(prices, by = c('label', 'province'))
+
+# تغییرات دیگر برای ستون label
+RU1401P3S01_processed2 <- RU1401P3S01_processed %>%
+  mutate(label = case_when(
+    code >= 11911 & code <= 11919 ~ "spices",
+    code == 11921 ~ "tomato paste",
+    code >= 12111 & code <= 12114 ~ "tea & coffee",
+    code == 12211 ~ "soda",
+    code >= 11171 & code <= 11175 ~ "biscuit & cake",
+    code == 11665 ~ "chips & pofak",
+    code == 11531 ~ "jamed oil",
+    code %in% c(11161, 11162, 11165) ~ "flour",
+    code == 11423 ~ "ice cream",
+    code == 12212 ~ "doogh",
+    code == 12213 ~ "beer",
+    code == 11433 ~ "curd",
+    code == 11661 ~ "sunflower seed",
+    code >= 11521 & code <= 11523 ~ "butter",
+    code == 11839  ~ "chocolate",
+    code == 11841 ~ "candy",
+    TRUE ~ label
+  ))
+
+
+
+
+
+
+
+
+```
+
+```{r}
+average_consumption2 <- RU1401P3S01_processed2 %>%
+  dplyr::group_by(Address , urban_rural, label,province) %>%
+  dplyr::summarize(average_consumption = weighted.mean(kilogram, weight, na.rm = TRUE), .groups = 'drop')
+```
+
+```{r}
+average_consumption2 <- average_consumption2 %>%
+  mutate(calories_per_kg = case_when(
+    label == "bread" ~ 2700,
+    label == "rice" ~ 2400,
+    label == "spaghetti" ~ 860,
+    label == "potato & pea" ~ 800,
+    label == "milk" ~ 500,
+    label == "yoghurt" ~ 500,
+    label == "Meat" ~ 1625, # Average for red meat and poultry
+    label == "egg" ~ 1300,
+    label == "cheese" ~ 1350,
+    label == "fruit" ~ 400,
+    label == "vegetables" ~ 200,
+    label == "oil" ~ 9700,
+    label == "sugar & Jam" ~ 3000,
+    label == "hobobat" ~ 800, # Calorie content unclear
+    label == "fish & chiken" ~ 2000,
+    label == "spices" ~ 0, # Negligible calories
+    label == "tomato paste" ~ 820,
+    label == "tea & coffee" ~ 0, # Negligible calories
+    label == "soda" ~ 425,
+    label == "biscuit & cake" ~ 4250,
+    label == "chips & pofak" ~ 5500,
+    label == "jamed oil" ~ 10000, # Calorie content unclear
+    label == "flour" ~ 3640,
+    label == "ice cream" ~ 2070,
+    label == "doogh" ~ 150,
+    label == "beer" ~ 430,
+    label == "curd" ~ 980,
+    label == "sunflower seed" ~ 5840,
+    label == "butter" ~ 7170,
+    label == "chocolate" ~ 5500,
+    label == "candy" ~ 3500,
+    TRUE ~ NA_real_
+  ))
+
+```
+
+### First Method
+
+```{r}
+# ایجاد address_counts با استفاده از member به صورت عددی
+address_counts <- RU1401P1 %>%
+  group_by(Address) %>%
+  dplyr::summarize(member = max(member, na.rm = TRUE), .groups = 'drop')
+
+# محاسبات برای average_consumption2
+# فرض بر اینکه average_consumption وجود دارد
+average_consumption2 <- average_consumption2 %>%
+  mutate(total_calories = average_consumption * calories_per_kg) %>%
+  group_by(Address, urban_rural,province) %>%
+  dplyr::summarize(total_calories = sum(total_calories, na.rm = TRUE), .groups = 'drop') %>%
+  mutate(daily_calories = total_calories / 30)
+
+# ادامه کد
+average_consumption2 <- average_consumption2 %>%
+  left_join(address_counts, by = "Address") %>%
+  mutate(
+    daily_calories = as.numeric(daily_calories),
+    member = as.numeric(member),  # اطمینان از عددی بودن member
+    daily_personal_calorie = daily_calories / member
+  )
+
+# فیلتر کردن داده‌های غیر فقیر
+not_poor <- average_consumption2 %>%
+  filter(daily_personal_calorie >= 2500)
+
+# محاسبه bundle_calories و alpha
+average_consumption2 <- average_consumption2 %>%
+  filter(daily_personal_calorie <= 2500) %>%
+  group_by(urban_rural,province) %>%
+  dplyr::summarize(bundle_calories = mean(daily_personal_calorie, na.rm = TRUE), .groups = 'drop') %>%
+  mutate(alpha = 2100 / bundle_calories)
+
+
+
+
+```
+
+### Second Method
+
+```{r}
+average_consumption <- RU1401P3S01_processed %>%
+  dplyr::group_by(Address , label,province) %>%
+  dplyr::summarize(average_consumption = weighted.mean(kilogram, weight, na.rm = TRUE), .groups = 'drop') 
+
+average_consumption <- average_consumption %>%
+  mutate(calories_per_kg = case_when(
+    label == "bread" ~ 2700,
+    label == "rice" ~ 2400,
+    label == "spaghetti" ~ 860,
+    label == "potato & pea" ~ 800,
+    label == "milk" ~ 500,
+    label == "yoghurt" ~ 500,
+    label == "Meat" ~ 1625, # Average for red meat and poultry
+    label == "egg" ~ 1300,
+    label == "cheese" ~ 1350,
+    label == "fruit" ~ 400,
+    label == "vegetables" ~ 200,
+    label == "oil" ~ 9700,
+    label == "sugar & Jam" ~ 3000,
+    label == "hobobat" ~ 800, # Calorie content unclear
+    label == "fish & chicken" ~ 2000,
+    TRUE ~ NA_real_
+  ))
+
+average_consumption <- average_consumption %>%
+  mutate(total_calories = average_consumption * calories_per_kg)
+
+
+# Calculate the total calories consumed in each province
+average_consumption <- average_consumption %>%
+  # Group by Address and Province
+  group_by(Address,province) %>%
+  # Summarize total calories for each Address within each Province
+  dplyr::summarize(total_calories = sum(total_calories, na.rm = TRUE), .groups = 'drop') %>%
+  # Calculate daily calories assuming 30 days in a month
+  mutate(daily_calories = total_calories / 30)
+
+average_consumption <- average_consumption %>%
+  left_join(address_counts, by = "Address") 
+
+
+# تبدیل ستون 'member' به عددی
+average_consumption <- average_consumption %>%
+  mutate(member = as.numeric(member))
+
+# حالا محاسبه daily_personal_calorie با استفاده از member به درستی انجام می‌شود
+average_consumption <- average_consumption %>%
+  mutate(daily_personal_calorie = daily_calories / member)
+
+
+
+
+
+
+
+average_consumption <- average_consumption %>% 
+  filter(daily_personal_calorie <= 2500) %>%
+  group_by(province) %>%
+  # Summarize to find the average daily calories per Province
+  dplyr::summarize(bundle_calories = mean(daily_personal_calorie, na.rm = TRUE), .groups = 'drop')
+
+  
+  #filter(daily_calories <= 2500) %>%
+  # Group by Province
+average_consumption <- average_consumption %>%
+  mutate(beta = 2100/bundle_calories)  
+
+average_consumption <- average_consumption %>%
+  left_join(average_consumption2, by = "province")
+
+average_consumption <- average_consumption %>% 
+  arrange(-bundle_calories.x)
+
+kable(average_consumption) %>%
+  kable_styling(bootstrap_options = "striped", full_width = FALSE)
+
+```
+
+# Quastion1.3
+
+```{r}
+food_value <- RU1401P3S01 %>% 
+  group_by(Address, province, weight) %>%
+  dplyr::summarize(total_value_food= sum(value, na.rm = TRUE))
+
+```
+
+```{r}
+engel <- total_values_sorted %>%
+  left_join(food_value, by = c("Address", "province", "weight"))%>% 
+  mutate(coeff = total_value_food / total_value, na.rm = TRUE) %>% 
+  filter(!is.na(coeff))
+
+weighted_engel_means <- engel %>%
+  group_by(province) %>%
+  dplyr::summarize(weighted_mean_coeff = weighted.mean(coeff, weight, na.rm = TRUE))
+
+
+
+Total_cost_by_province2 <- Total_cost_by_province1 %>%
+  left_join(weighted_engel_means, by = "province")
+
+Total_cost_by_province2 <- Total_cost_by_province2 %>%
+  dplyr::mutate(poverty_line = total_bundle_price / weighted_mean_coeff)
+
+Total_cost_by_province2 <- Total_cost_by_province2 %>% 
+  arrange(-poverty_line)
+
+kable(Total_cost_by_province2) %>%
+  kable_styling(bootstrap_options = "striped", full_width = FALSE)
+```
+
+## Poverty Gap
+
+```{r}
+
+Province <- c(Markazi = "00", Ardabil = "24", Bushehr = "18", `Chaharmahal and Bakhtiari` = "14",
+  `East Azerbaijan` = "03", Fars = "07", Gilan = "01", Golestan = "27",
+  Hamadan = "13", Hormozgan = "22", Ilam = "16", Isfahan = "10",
+  Kerman = "08", Kermanshah = "05", Khuzestan = "06", `Kohgiluyeh and Boyer-Ahmad` = "17",
+  Kurdistan = "12", Lorestan = "15", Alborz = "30", Mazandaran = "02",
+  `North Khorasan` = "28", Qazvin = "26", Qom = "25", `Razavi Khorasan` = "09",
+  Semnan = "20", `Sistan and Baluchestan` = "11", `South Khorasan` = "29", Tehran = "23",
+  `West Azerbaijan` = "04", Yazd = "21", Zanjan = "19")
+
+RU1401P4S01 <- RU1401P4S01 %>%
+  rename(
+    member = DYCOL01,
+    employed_w = DYCOL02,
+    ISCO_w = DYCOL03,
+    ISIC_w = DYCOL04,
+    status_w = DYCOL05,
+    hours_w = DYCOL06,
+    days_w = DYCOL07,
+    income_w_m = DYCOL08,
+    income_w_y = DYCOL09,
+    wage_w_m = DYCOL10,
+    wage_w_y = DYCOL11,
+    perk_w_m = DYCOL12,
+    perk_w_y = DYCOL13,
+    netincome_w_m = DYCOL14,
+    netincome_w_y = DYCOL15) %>% 
+  mutate(province = fct_recode(as.factor(substr(Address, 2, 3)), !!!Province),
+         town = as.integer(substr(Address, 4, 5)))  
+
+# Part 4, Table 2
+RU1401P4S02 <- RU1401P4S02 %>%
+  rename(
+    member = DYCOL01,
+    employed_s = DYCOL02,
+    ISCO_s = DYCOL03,
+    ISIC_s = DYCOL04,
+    status_s = DYCOL05,
+    agriculture = DYCOL06,
+    hours_s = DYCOL07,
+    days_s = DYCOL08,
+    cost_employment = DYCOL09,
+    cost_raw = DYCOL10,
+    cost_machinery = DYCOL11,
+    cost_others = DYCOL12,
+    cost_tax = DYCOL13,
+    sale = DYCOL14,
+    income_s_y = DYCOL15) %>% 
+  mutate(province = fct_recode(as.factor(substr(Address, 2, 3)), !!!Province),
+         town = as.integer(substr(Address, 4, 5)))  
+
+# Part 4, Table 3
+RU1401P4S03 <- RU1401P4S03 %>%
+  rename(
+    member = DYCOL01,
+    income_pension = DYCOL03,
+    income_rent = DYCOL04,
+    income_interest = DYCOL05,
+    income_aid = DYCOL06,
+    income_resale = DYCOL07,
+    income_transfer = DYCOL08) %>% 
+  mutate(province = fct_recode(as.factor(substr(Address, 2, 3)), !!!Province),
+         town = as.integer(substr(Address, 4, 5)))   
+
+# Part 4, Table 4
+RU1401P4S04 <- RU1401P4S04 %>%
+  rename(
+    member = Dycol01,
+    subsidy_number = Dycol03,
+    subsidy_month = Dycol04,
+    subsidy = Dycol05) %>% 
+  mutate(province = fct_recode(as.factor(substr(Address, 2, 3)), !!!Province),
+         town = as.integer(substr(Address, 4, 5))) 
+
+
+
+```
+
+```{r}
+library(dplyr)
+
+# Convert all income columns to numeric
+RU1401P4S03_processed <- RU1401P4S03 %>%
+  mutate(across(starts_with("income"), ~ as.numeric(as.character(.)))) %>%
+  mutate(across(starts_with("income"), ~ . / 12)) %>%
+  rowwise() %>%
+  mutate(netincome_w_m = sum(c_across(starts_with("income")), na.rm = TRUE)) %>%
+  select(-starts_with("income"), Address, netincome_w_m)
+
+
+
+
+
+
+# Process RU1401P4S04
+RU1401P4S04_processed <- RU1401P4S04 %>%
+  mutate(netincome_w_m = as.numeric(subsidy) / 12) %>%
+  select(Address, netincome_w_m, province)
+
+# Process RU1401P4S02
+RU1401P4S02_processed <- RU1401P4S02 %>%
+  mutate(netincome_w_m = as.numeric(income_s_y) / 12) %>%
+  select(Address, netincome_w_m, province)
+
+# Process RU1401P4S03
+RU1401P4S03_processed <- RU1401P4S03 %>%
+  mutate(across(starts_with("income"), ~ as.numeric(as.character(.)))) %>%
+  mutate(across(starts_with("income"), ~ . / 12)) %>%
+  rowwise() %>%
+  mutate(netincome_w_m = sum(c_across(starts_with("income")), na.rm = TRUE)) %>%
+  select(-starts_with("income"), Address, netincome_w_m)
+
+# Combine datasets and calculate total monthly net income
+combined_income <- bind_rows(RU1401P4S03_processed, RU1401P4S04_processed, RU1401P4S02_processed) %>%
+  dplyr::group_by(Address, province) %>%
+  dplyr::summarize(total_netincome_w_m = sum(netincome_w_m, na.rm = TRUE))
+
+
+```
+
+```{r}
+poverty_line_data <- Total_cost_by_province2 %>%
+  select(province, poverty_line)
+
+
+# Join poverty_line to combined_income
+combined_income <- combined_income %>%
+  left_join(poverty_line_data, by = "province")
+
+# Select required columns from RU99Data
+weight_data <- RU1401Data %>%
+  select(Address, weight)
+
+# Join weight to combined_income
+combined_income <- combined_income %>%
+  left_join(weight_data, by = "Address")
+
+# Select required columns from address_counts
+member_data <- address_counts %>%
+  select(Address, member)
+
+# Join member to combined_income
+combined_income <- combined_income %>%
+  left_join(member_data, by = "Address")
+
+# Filter to keep rows where netincome_w_m is lower than poverty_line/
+# Ensure 'member' column is numeric
+combined_income <- combined_income %>%
+  mutate(member = as.numeric(as.character(member)))  # Convert 'member' to numeric
+
+library(dplyr)
+
+# Ensure 'member' and 'poverty_line' are numeric
+combined_income <- combined_income %>%
+  mutate(member = as.numeric(as.character(member)))  # Convert 'member' to numeric
+
+#poverty_line <- as.numeric(poverty_line)  # Convert 'poverty_line' to numeric
+
+# Check for NA values in 'member' and handle them (e.g., setting to 1 if NA to avoid division by NA)
+combined_income <- combined_income %>%
+  mutate(member = ifelse(is.na(member), 1, member))
+
+# Filter and calculate additional columns
+combined_income_filtered <- combined_income %>%
+  filter(total_netincome_w_m < poverty_line) %>%
+  mutate(total_netincome_w_m2 = total_netincome_w_m / member) %>%
+  mutate(asgar = total_netincome_w_m2 / poverty_line) %>%
+  filter(asgar > 0)
+
+print(combined_income_filtered)
+
+
+```
+
+```{r}
+total_weight_by_province <- combined_income %>%
+  group_by(province) %>%
+  dplyr::summarize(total_province_weight = sum(weight, na.rm = TRUE))
+
+# Next, calculate the poverty gap for each province and normalize it by the province's total weight
+poverty_gap_by_province <- combined_income_filtered %>%
+  group_by(province) %>%
+  dplyr::summarize(poverty_gap = sum(weight * (1 - asgar), na.rm = TRUE)) %>%
+  left_join(total_weight_by_province, by = "province") %>%
+  mutate(poverty_gap = poverty_gap / total_province_weight)
+
+poverty_gap_by_province <- poverty_gap_by_province %>% 
+  arrange(poverty_gap)
+
+kable(poverty_gap_by_province) %>%
+  kable_styling(bootstrap_options = "striped", full_width = FALSE)
+
+```
+
+## Quastion1. 4
+
+```{r}
+# Process RU1401P4S03
+RU1401P4S03_processed <- RU1401P4S03 %>%
+  mutate(across(starts_with("income"), ~ as.numeric(as.character(.)) / 12)) %>%
+  rowwise() %>%
+  mutate(netincome_w_m = sum(c_across(starts_with("income")), na.rm = TRUE)) %>%
+  select(-starts_with("income"), Address, netincome_w_m, member)
+
+# Process RU1401P4S04
+RU1401P4S04_processed <- RU1401P4S04 %>%
+  mutate(netincome_w_m = as.numeric(as.character(subsidy)) / 12) %>%
+  select(Address, netincome_w_m, province, member)
+
+# Process RU1401P4S02
+RU1401P4S02_processed <- RU1401P4S02 %>%
+  mutate(netincome_w_m = as.numeric(as.character(income_s_y)) / 12) %>%
+  select(Address, netincome_w_m, province, member)
+
+# Combine datasets and calculate total monthly net income
+combined_income <- bind_rows(RU1401P4S03_processed, RU1401P4S04_processed, RU1401P4S02_processed) %>%
+  dplyr::group_by(Address, province) %>%
+  dplyr::summarize(total_netincome_w_m = sum(netincome_w_m, na.rm = TRUE))
+
+```
+
+```{r}
+combined_income <- combined_income %>%
+  left_join(poverty_line_data, by = "province") %>% 
+  left_join(address_counts, by= "Address")
+
+combined_income <- combined_income %>%
+  mutate(member = as.numeric(member))
+
+
+combined_income <- combined_income %>%
+  mutate(below_poverty_line = ifelse(total_netincome_w_m / member < poverty_line, 1, 0))
+
+# Assuming 'Address' is a common key in both datasets
+RU1401P1 <- RU1401P1 %>%
+  left_join(combined_income %>% select(Address, below_poverty_line), by = "Address") %>%
+  mutate(below_poverty = ifelse(is.na(below_poverty_line), 0, below_poverty_line)) %>% 
+  select(-below_poverty_line)
+
+
+
+
+
+```
+
+```{r}
+consumption <- merged_data %>%
+  dplyr::group_by(Address , province, label) %>%
+  dplyr::summarize(average_consumption = weighted.mean(kilogram, weight, na.rm = TRUE), .groups = 'drop') 
+
+
+consumption <- consumption %>%
+  mutate(calories_per_kg = case_when(
+    label == "bread" ~ 2700,
+    label == "rice" ~ 2400,
+    label == "spaghetti" ~ 860,
+    label == "potato & pea" ~ 800,
+    label == "milk" ~ 500,
+    label == "yoghurt" ~ 500,
+    label == "Meat" ~ 1625, # Average for red meat and poultry
+    label == "egg" ~ 1300,
+    label == "cheese" ~ 1350,
+    label == "fruit" ~ 400,
+    label == "vegetables" ~ 200,
+    label == "oil" ~ 9700,
+    label == "sugar & Jam" ~ 3000,
+    label == "hobobat" ~ 800, # Calorie content unclear
+    label == "fish & chiken" ~ 2000,
+    label == "spices" ~ 0, # Negligible calories
+    label == "tomato paste" ~ 820,
+    label == "tea & coffee" ~ 0, # Negligible calories
+    label == "soda" ~ 425,
+    label == "biscuit & cake" ~ 4250,
+    label == "chips & pofak" ~ 5500,
+    label == "jamed oil" ~ 10000, # Calorie content unclear
+    label == "flour" ~ 3640,
+    label == "ice cream" ~ 2070,
+    label == "doogh" ~ 150,
+    label == "beer" ~ 430,
+    label == "curd" ~ 980,
+    label == "sunflower seed" ~ 5840,
+    label == "butter" ~ 7170,
+    label == "chocolate" ~ 5500,
+    label == "candy" ~ 3500,
+    TRUE ~ NA_real_
+  ))
+
+
+
+consumption <- consumption %>%
+  mutate(total_calories = average_consumption * calories_per_kg)
+
+
+# Calculate the total calories consumed in each province
+consumption <- consumption %>%
+  # Group by Address and Province
+  group_by(Address, province) %>%
+  # Summarize total calories for each Address within each Province
+  dplyr::summarize(total_calories = sum(total_calories, na.rm = TRUE), .groups = 'drop') %>%
+  # Calculate daily calories assuming 30 days in a month
+  mutate(daily_calories = total_calories / 30)
+
+
+consumption <- consumption %>%
+  left_join(address_counts, by = "Address") %>% 
+  # تبدیل ستون member به عددی
+  mutate(member = as.numeric(member)) %>%
+  # محاسبه مصرف کالری روزانه برای هر فرد
+  mutate(daily_personal_calorie = daily_calories / member)
+ 
+
+
+# Join average_consumption with consumption by province
+consumption <- consumption %>%
+  left_join(average_consumption %>% select(province, bundle_calories.x), by = "province")
+
+# Create a dummy variable for daily_personal_calorie < bundle_calories.x
+consumption <- consumption %>%
+  mutate(low_calorie_dummy = ifelse(daily_personal_calorie < bundle_calories.x, 1, 0))
+
+# Assuming 'Address' is a common key in both datasets
+RU1401P1 <- RU1401P1 %>%
+  left_join(consumption %>% select(Address, low_calorie_dummy), by = "Address") %>%
+  mutate(low_calorie_dummy = ifelse(is.na(low_calorie_dummy), 0, low_calorie_dummy))
+```
+
+```{r}
+RU1401P1 <- RU1401P1 %>%
+  group_by(Address) %>%
+  mutate(Head_educ = ifelse(any(relation == "head" & literacy == "illiterate", na.rm = TRUE), 1, 0),
+         Head_educ1 = ifelse(any(relation == "head" & education == "Elemantry", na.rm = TRUE), 1, 0)) %>%
+  mutate(Head_educ2 = ifelse(Head_educ == 1 | Head_educ1 == 1, 1, 0)) %>%
+  select(-Head_educ, -Head_educ1)
+
+
+RU1401P1 <- RU1401P1 %>%
+  group_by(Address) %>%
+  mutate(child_not_studying = ifelse(any(relation == "child" & age >= 7 & age <= 18 & studying == "No", na.rm = TRUE), 1, 0)) %>%
+  ungroup()
+```
+
+```{r}
+RU1401P2 <- RU1401P2 %>%
+  mutate(tenure_dummy = ifelse(tenure %in% c("OwnedEstateLand", "OwnedEstate", "Free"), 0, 1))
+
+
+RU1401P1 <- RU1401P1 %>%
+  left_join(RU1401P2 %>% select(Address, tenure_dummy), by = "Address") %>%
+  mutate(tenure = ifelse(is.na(tenure_dummy), 1, tenure_dummy)) %>%
+  select(-tenure_dummy)  # Optional: Remove the tenure_dummy column
+
+
+RU1401P2 <- merge(RU1401P2, address_counts, by = "Address", all.x = TRUE)
+
+
+# Calculate space_per_capita
+RU1401P2 <- RU1401P2 %>%
+  mutate(
+    member = as.numeric(member),  # تبدیل ستون member به عددی
+    space_per_capita = space / member  # محاسبه فضای سرانه
+  )
+
+
+# Create a dummy variable for space_per_capita < 16
+address_space_issue <- RU1401P2 %>%
+  mutate(space_issue = ifelse(space_per_capita < 16, 1, 0)) %>%
+  select(Address, space_issue)
+
+
+RU1401P1 <- RU1401P1 %>%
+  left_join(address_space_issue, by = "Address") %>%
+  mutate(space_issue = ifelse(is.na(space_issue), 0, space_issue))
+
+#internet
+RU1401P2 <- RU1401P2 %>%
+  mutate(no_internet_dummy = ifelse(internet == "FALSE", 1, 0))
+
+
+RU1401P1 <- RU1401P1 %>%
+  left_join(RU1401P2 %>% select(Address, no_internet_dummy), by = "Address") %>%
+  mutate(no_internet_dummy = ifelse(is.na(no_internet_dummy), 0, no_internet_dummy))
+
+#cellphone
+RU1401P2 <- RU1401P2 %>%
+  mutate(no_mobile_dummy = ifelse(cellphone == "FALSE", 1, 0))
+
+# Join this information with RU99P1
+RU1401P1 <- RU1401P1 %>%
+  left_join(RU1401P2 %>% select(Address, no_mobile_dummy), by = "Address") %>%
+  mutate(no_mobile_dummy = ifelse(is.na(no_mobile_dummy), 0, no_mobile_dummy))
+
+
+RU1401P2 <- RU1401P2 %>%
+  mutate(lacks_appliances = ifelse((TV + computer + refridgerator + freezer + vehicle) < 2, 1, 0))
+
+# Join this information with RU99P1
+RU1401P1 <- RU1401P1 %>%
+  left_join(RU1401P2 %>% select(Address, lacks_appliances), by = "Address") %>%
+  mutate(lacks_appliances = ifelse(is.na(lacks_appliances), 0, lacks_appliances))
+
+```
+
+```{r}
+RU1401P1 <- RU1401P1 %>%
+  rename(
+    below_poverty_income = below_poverty,
+    below_poverty_calorie = low_calorie_dummy,
+    head_illiterate = Head_educ2,
+    child_not_in_school = child_not_studying,
+    house_rented = tenure,
+    little_living_space = space_issue,
+    internet_access = no_internet_dummy,
+    cellphone_access = no_mobile_dummy,
+    lacks_appliances = lacks_appliances
+  ) 
+
+multidimensional_index <- RU1401P1 %>%  # تغییر RU99P1 به RU1401P1
+  select(
+    Address,
+    member,
+    below_poverty_income,
+    below_poverty_calorie,
+    head_illiterate,
+    child_not_in_school,
+    house_rented,
+    little_living_space,
+    internet_access,
+    cellphone_access,
+    lacks_appliances
+  )
+
+multidimensional_index <- multidimensional_index %>%
+  mutate(
+    province = fct_recode(as.factor(substr(Address, 2, 3)), !!!Province),
+    
+    # Health Dimension (Total Weight = 1/3)
+    Health_Score = (below_poverty_calorie * 1/6 + below_poverty_income * 1/6),
+    
+    # Education Dimension (Total Weight = 1/3)
+    Education_Score = (head_illiterate * 1/6 + child_not_in_school * 1/6),
+    
+    # Living Standards Dimension (Total Weight = 1/3)
+    Living_Standards_Score = (house_rented * 1/12 + little_living_space * 1/12 +
+                              internet_access * 1/12 + cellphone_access * 1/12 +
+                              lacks_appliances * 1/12),
+
+    # Total MPI Score
+    MPI_Score = Health_Score + Education_Score + Living_Standards_Score
+  ) %>%
+  select(Address, member, province, Health_Score, Education_Score, Living_Standards_Score, MPI_Score)
+
+multidimensional_index <- multidimensional_index %>%
+  left_join(RU1401Data %>% select(Address, weight), by = "Address")  # تغییر RU99Data به RU1401Data
+
+# Calculate the weighted average of MPI scores for each province
+multidimensional_index_province <- multidimensional_index %>%
+  group_by(province) %>%
+  dplyr::summarize(weighted_avg_MPI = sum(MPI_Score * weight, na.rm = TRUE) / sum(weight, na.rm = TRUE))
+
+multidimensional_index_province <- multidimensional_index_province %>% 
+  arrange(weighted_avg_MPI)
+
+kable(multidimensional_index_province) %>%
+  kable_styling(bootstrap_options = "striped", full_width = FALSE)
+
+```
+
+## Map for poverty gap
+
+```{r}
+
+
+
+map_data <- st_read("C:/Users/user/Downloads/ir.json")
+
+colnames(map_data)
+
+map_data <- map_data %>%
+  left_join(poverty_gap_by_province, by = c("name" = "province"))
+
+leaflet(data = map_data) %>%
+  addTiles() %>%
+  addPolygons(
+    fillColor = ~colorQuantile("YlGnBu", poverty_gap, n = 5)(poverty_gap),
+    fillOpacity = 0.7,
+    color = "white",
+    weight = 1,
+    popup = ~paste("Province:", name, "<br>", "Poverty Gap:", poverty_gap)
+  ) %>%
+  addLegend(
+    position = "bottomright",
+    pal = colorQuantile("YlGnBu", map_data$poverty_gap, n = 5),
+    values = map_data$poverty_gap,
+    title = "Poverty Gap"
+  )
+
+
+
+
+```
+
+## Map for MPI
+
+```{r}
+map_data <- st_read("C:/Users/user/Downloads/ir.json")
+
+colnames(map_data)
+
+map_data <- map_data %>%
+  left_join(multidimensional_index_province, by = c("name" = "province"))
+
+leaflet(data = map_data) %>%
+  addTiles() %>%
+  addPolygons(
+    fillColor = ~colorQuantile("YlGnBu", weighted_avg_MPI, n = 5)(weighted_avg_MPI),
+    fillOpacity = 0.7,
+    color = "white",
+    weight = 1,
+    popup = ~paste("Province:", name, "<br>", "Poverty Gap:", weighted_avg_MPI)
+  ) %>%
+  addLegend(
+    position = "bottomright",
+    pal = colorQuantile("YlGnBu", map_data$weighted_avg_MPI, n = 5),
+    values = map_data$weighted_avg_MPI,
+    title = "MPI"
+  )
+```
+
+## Map for Poverty line
+
+```{r}
+map_data <- st_read("C:/Users/user/Downloads/ir.json")
+
+colnames(map_data)
+
+map_data <- map_data %>%
+  left_join(poverty_line_data, by = c("name" = "province"))
+
+leaflet(data = map_data) %>%
+  addTiles() %>%
+  addPolygons(
+    fillColor = ~colorQuantile("YlGnBu", poverty_line, n = 5)(poverty_line),
+    fillOpacity = 0.7,
+    color = "white",
+    weight = 1,
+    popup = ~paste("Province:", name, "<br>", "Poverty Gap:", poverty_line)
+  ) %>%
+  addLegend(
+    position = "bottomright",
+    pal = colorQuantile("YlGnBu", map_data$poverty_line, n = 5),
+    values = map_data$poverty_line,
+    title = "poverty line"
+  )
+```
+
+# Inequality Analysis
+
+```{r}
+
+data <- read.csv("C:\\Users\\user\\Desktop\\nemone_2_darsadi_1402.csv")
+
+selected_columns <- c("id", "Parent_Id", "GenderId", "Age", "isurban", "CarsPrice", "Daramad", "Bourse_NetPortfoValue", "SabteAhval_provincename")
+subset_data <- data[, selected_columns]
+
+
+head(subset_data)
+
+
+```
+
+```{r}
+
+
+# Calculate income and add it to the data
+subset_data$income <- subset_data$CarsPrice + subset_data$Daramad + subset_data$Bourse_NetPortfoValue
+
+# Remove rows where income is NA
+subset_data <- subset_data[!is.na(subset_data$income), ]
+
+# Assign weight based on conditions
+subset_data$weight <- ifelse(subset_data$id == subset_data$Parent_Id, 1, 
+                             ifelse(subset_data$Age >= 18, 0.8, 0.5))
+
+subset_data1 <- subset_data %>% group_by(Parent_Id) %>%
+  summarise(weight = sum(weight), income = sum(income), SabteAhval_provincename)
+
+subset_data1$income_per <- subset_data1$income / subset_data1$weight
+
+
+
+```
+
+```{r}
+
+# Step 1: Sort the dataset based on 'income_per_capita'
+subset_data1 <- subset_data1[order(subset_data1$income_per), ]
+
+# Step 2: Calculate the normalized cumulative sum of income and population
+normalized_income <- subset_data1$income_per / sum(subset_data1$income_per)
+normalized_population <- subset_data1$weight / sum(subset_data1$weight)
+
+# Step 3: Calculate cumulative shares manually
+cumulative_income_share <- cumsum(normalized_income)
+cumulative_population_share <- cumsum(normalized_population)
+
+# Step 4: Calculate the Gini coefficient by integrating the area between the curves
+gini_area <- sum((cumulative_population_share - cumulative_income_share) * diff(c(0, cumulative_population_share)))
+gini_index <- 1 - 2 * gini_area
+
+# Output the Gini index
+print(gini_index)
+
+
+
+
+
+
+```
+
+```{r}
+# Step 1: Sort the dataset by income in descending order
+subset_data1 <- subset_data1[order(-subset_data1$income_per), ]
+
+# Step 2: Initialize a vector to store the cumulative income manually
+subset_data1$cumulative_income <- numeric(nrow(subset_data1))
+
+# Step 3: Calculate cumulative income using a for loop
+for (i in 1:nrow(subset_data1)) {
+  if (i == 1) {
+    subset_data1$cumulative_income[i] <- subset_data1$income_per[i]
+  } else {
+    subset_data1$cumulative_income[i] <- subset_data1$cumulative_income[i - 1] + subset_data1$income_per[i]
+  }
+}
+
+# Step 4: Calculate the total income
+total_income <- sum(subset_data1$income_per)
+
+# Step 5: Identify the threshold for the top 1% income share
+threshold <- total_income * 0.01
+
+# Step 6: Find the index where cumulative income exceeds the 1% threshold
+index <- which(subset_data1$cumulative_income >= threshold)[1]
+
+# Step 7: Calculate the share of income for the top 1%
+top_1_percent <- sum(subset_data1$income_per[1:index]) / total_income * 100
+
+# Step 8: Print the result
+cat("Top one prcent Income Share:", round(top_1_percent, 2))
+
+# Step 9: Merge data with another dataset
+subset_data1 <- merge(subset_data1, subset(subset_data, select = c(Parent_Id, SabteAhval_provincename)), by = "Parent_Id")
+
+```
+
+Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.
